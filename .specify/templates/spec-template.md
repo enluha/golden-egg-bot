@@ -5,6 +5,30 @@
 **Status**: Draft  
 **Input**: User description: "$ARGUMENTS"
 
+## Product Definition *(mandatory)*
+Summarize the outcome in business language: what we are delivering, why it matters, and how it
+reinforces the GoldenEggBot constitution and SPECIFY charter (modular strategies, deterministic
+validation, live multi-exchange execution, dual telemetry surfaces).
+
+### Purpose
+[Explain the business objective and how it advances automated trading research + live operations.]
+
+### Scope Boundaries
+- **In Scope**: [Capabilities included, e.g., new strategy folder, exchange adapter, telemetry flow.]
+- **Out of Scope**: [Explicit exclusions to prevent scope creep.]
+
+### Actors
+- **Researcher**: validates strategies through the four test harnesses and artifacts.
+- **Trader**: runs live/paper sessions with Telegram + CLI parity.
+- **Contributor**: extends exchanges/strategies via ABC contracts.
+
+Document assumptions or dependencies that materially affect scope.
+
+### Upstream Assets *(reference when applicable)*
+- Flag Patterns (TechnicalAnalysisAutomation): [Link or commit] — leveraged for trendline/flag logic.
+- Donchian Breakout (mcpt): [Link or commit] — leveraged for channel calculations and permutation/walk-forward tooling.
+- Additional repositories/data sources: [List or mark N/A].
+
 ## User Scenarios & Testing *(mandatory)*
 
 <!--
@@ -20,9 +44,10 @@
   - Demonstrated to users independently
 -->
 
-### User Story 1 - [Brief Title] (Priority: P1)
+### User Story 1 - Researcher Validates Strategy (Priority: P1)
 
-[Describe this user journey in plain language]
+[Describe how a researcher exercises Excellence, Permutation, Walk-Forward, and Walk-Forward
+Permutation scripts using seeded runs and inspects artifacts.]
 
 **Why this priority**: [Explain the value and why it has this priority level]
 
@@ -35,23 +60,10 @@
 
 ---
 
-### User Story 2 - [Brief Title] (Priority: P2)
+### User Story 2 - Trader Operates Live Session (Priority: P2)
 
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 3 - [Brief Title] (Priority: P3)
-
-[Describe this user journey in plain language]
+[Describe how a trader launches live/paper trading on supported exchanges, receives Telegram/CLI
+controls, and monitors portfolio metrics + risk events.]
 
 **Why this priority**: [Explain the value and why it has this priority level]
 
@@ -63,7 +75,22 @@
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+### User Story 3 - Contributor Extends Platform (Priority: P3)
+
+[Describe how a contributor adds an exchange adapter or strategy via ABC contracts without touching
+other domains.]
+
+**Why this priority**: [Explain the value and why it has this priority level]
+
+**Independent Test**: [Describe how this can be tested independently]
+
+**Acceptance Scenarios**:
+
+1. **Given** [initial state], **When** [action], **Then** [expected outcome]
+
+---
+
+Add more user stories as needed, each with an assigned priority.
 
 ### Edge Cases
 
@@ -84,21 +111,25 @@
 
 ### Functional Requirements
 
-- **FR-001**: System MUST [specific capability, e.g., "allow users to create accounts"]
-- **FR-002**: System MUST [specific capability, e.g., "validate email addresses"]  
-- **FR-003**: Users MUST be able to [key interaction, e.g., "reset their password"]
-- **FR-004**: System MUST [data requirement, e.g., "persist user preferences"]
-- **FR-005**: System MUST [behavior, e.g., "log all security events"]
+Group requirements by constitution pillar when possible.
 
-*Example of marking unclear requirements:*
+- **FR-Strategy**: [e.g., "Strategy module exposes generate_signal/optimize_parameters/warmup_bars via StrategyBase."]
+- **FR-Validation**: [e.g., "Provide Excellence/Permutation/WF/WF Permutation runners producing seeded artifacts in `artifacts/`."]  
+- **FR-Risk**: [e.g., "RiskManager enforces daily and per-trade caps, concurrency limits, circuit breaker hooks."]
+- **FR-Telemetry**: [e.g., "CLI and Telegram share command surface and broadcast structured notifications with visuals."]
+- **FR-Portfolio**: [e.g., "Display USD balances, asset holdings, cross/isolated margins, and configured limits."]
+- **FR-Data Integrity**: [e.g., "Version inputs, log transformations, quarantine suspect feeds."]
+- **FR-Compliance**: [If applicable, outline logging/audit obligations.]
 
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+Use `[NEEDS CLARIFICATION: question]` sparingly (max 3) for requirements that cannot be resolved with
+a reasonable default and materially affect scope or compliance.
 
 ### Key Entities *(include if feature involves data)*
 
-- **[Entity 1]**: [What it represents, key attributes without implementation]
-- **[Entity 2]**: [What it represents, relationships to other entities]
+- **PortfolioSnapshot**: [Attributes for balances, PnL, margins, timestamps.]
+- **StrategyArtifact**: [Metadata for deterministic outputs (seed, file paths, validation type).]
+- **RiskPolicy**: [Caps, thresholds, escalation contacts.]
+- Additional entities as required for the feature.
 
 ## Success Criteria *(mandatory)*
 
@@ -109,7 +140,9 @@
 
 ### Measurable Outcomes
 
-- **SC-001**: [Measurable metric, e.g., "Users can complete account creation in under 2 minutes"]
-- **SC-002**: [Measurable metric, e.g., "System handles 1000 concurrent users without degradation"]
-- **SC-003**: [User satisfaction metric, e.g., "90% of users successfully complete primary task on first attempt"]
-- **SC-004**: [Business metric, e.g., "Reduce support tickets related to [X] by 50%"]
+- **SC-Validation**: [e.g., "All four strategy tests complete with identical metrics/artifacts across seeded runs."]
+- **SC-Risk**: [e.g., "Live session halts within N seconds when daily loss cap breached and emits notification."]
+- **SC-Latency**: [e.g., "Median signal-to-order submission latency <250ms excluding exchange response."]
+- **SC-Telemetry**: [e.g., "100% of orders/fills/risk events trigger CLI + Telegram notifications with visuals."]
+- **SC-Portfolio**: [e.g., "Portfolio view refresh latency <= X seconds; accuracy verified against exchange balances."]
+- **SC-Quality Gates**: [e.g., "CI publishes artifacts and summary for updated strategies before merge."]

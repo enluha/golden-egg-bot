@@ -1,2 +1,5 @@
 .codex/
 venvTrading/
+artifacts/
+*.pyc
+__pycache__/
