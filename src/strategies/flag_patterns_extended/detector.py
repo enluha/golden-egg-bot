@@ -1,0 +1,1 @@
+# wraps/extends flags_pennants logic (no lookahead)
