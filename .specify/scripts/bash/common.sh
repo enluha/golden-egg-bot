@@ -19,26 +19,28 @@ get_current_branch() {
         echo "$SPECIFY_FEATURE"
         return
     fi
-    
+
     # Then check git if available
     if git rev-parse --abbrev-ref HEAD >/dev/null 2>&1; then
         git rev-parse --abbrev-ref HEAD
         return
     fi
-    
+
     # For non-git repos, try to find the latest feature directory
-    local repo_root=$(get_repo_root)
+    local repo_root
+    repo_root="$(get_repo_root)"
     local specs_dir="$repo_root/specs"
-    
+
     if [[ -d "$specs_dir" ]]; then
         local latest_feature=""
         local highest=0
-        
+
         for dir in "$specs_dir"/*; do
             if [[ -d "$dir" ]]; then
-                local dirname=$(basename "$dir")
+                local dirname
+                dirname="$(basename "$dir")"
                 if [[ "$dirname" =~ ^([0-9]{3})- ]]; then
-                    local number=${BASH_REMATCH[1]}
+                    local number="${BASH_REMATCH[1]}"
                     number=$((10#$number))
                     if [[ "$number" -gt "$highest" ]]; then
                         highest=$number
@@ -47,13 +49,13 @@ get_current_branch() {
                 fi
             fi
         done
-        
+
         if [[ -n "$latest_feature" ]]; then
             echo "$latest_feature"
             return
         fi
     fi
-    
+
     echo "main"  # Final fallback
 }
 
@@ -65,35 +67,38 @@ has_git() {
 check_feature_branch() {
     local branch="$1"
     local has_git_repo="$2"
-    
+
     # For non-git repos, we can't enforce branch naming but still provide output
     if [[ "$has_git_repo" != "true" ]]; then
         echo "[specify] Warning: Git repository not detected; skipped branch validation" >&2
         return 0
     fi
-    
+
     if [[ ! "$branch" =~ ^[0-9]{3}- ]]; then
         echo "ERROR: Not on a feature branch. Current branch: $branch" >&2
         echo "Feature branches should be named like: 001-feature-name" >&2
         return 1
     fi
-    
+
     return 0
 }
 
 get_feature_dir() { echo "$1/specs/$2"; }
 
 get_feature_paths() {
-    local repo_root=$(get_repo_root)
-    local current_branch=$(get_current_branch)
+    local repo_root
+    repo_root="$(get_repo_root)"
+    local current_branch
+    current_branch="$(get_current_branch)"
     local has_git_repo="false"
-    
+
     if has_git; then
         has_git_repo="true"
     fi
-    
-    local feature_dir=$(get_feature_dir "$repo_root" "$current_branch")
-    
+
+    local feature_dir
+    feature_dir="$(get_feature_dir "$repo_root" "$current_branch")"
+
     cat <<EOF
 REPO_ROOT='$repo_root'
 CURRENT_BRANCH='$current_branch'
@@ -109,5 +114,34 @@ CONTRACTS_DIR='$feature_dir/contracts'
 EOF
 }
 
-check_file() { [[ -f "$1" ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
-check_dir() { [[ -d "$1" && -n $(ls -A "$1" 2>/dev/null) ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
+check_file() {
+    if [[ -f "$1" ]]; then
+        echo "  * $2"
+    else
+        echo "  - $2"
+    fi
+}
+
+check_dir() {
+    if [[ -d "$1" && -n $(ls -A "$1" 2>/dev/null) ]]; then
+        echo "  * $2"
+    else
+        echo "  - $2"
+    fi
+}
+
+specify_executable() {
+    local path="$HOME/.local/bin/specify"
+    if [[ -x "$path" ]]; then
+        echo "$path"
+    else
+        echo "[specify] CLI not found. Install with: uv tool install specify-cli --from git+https://github.com/github/spec-kit.git" >&2
+        return 1
+    fi
+}
+
+run_specify() {
+    local exe
+    exe="$(specify_executable)" || return 1
+    PYTHONIOENCODING="${PYTHONIOENCODING:-utf-8}" PATH="$HOME/.local/bin:$PATH" "$exe" "$@"
+}
