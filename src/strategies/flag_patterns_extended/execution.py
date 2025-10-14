@@ -82,3 +82,50 @@ def compute_net_return(entry_price: float, exit_price: float, direction: Directi
 
 def boundary_value_at(ln: BoundaryLine, x: int) -> float:
     return ln.slope * x + ln.intercept
+
+
+def update_trailing_stop(
+    df: pd.DataFrame,
+    atr: pd.Series,
+    t: int,
+    direction: Direction,
+    cur_stop: float,
+    cfg: Config,
+) -> float:
+    """ATR chandelier-style trailing stop."""
+    if t >= len(df):
+        return cur_stop
+    lookback = max(1, int(getattr(cfg, "trail_lookback", 14)))
+    k = float(getattr(cfg, "trail_atr_k", 3.0))
+    start = max(0, t - lookback + 1)
+    atr_val = float(atr.iat[t]) if t < len(atr) else float("nan")
+    if not np.isfinite(atr_val):
+        atr_val = 0.0
+    if direction == "bull":
+        ref = float(df["high"].iloc[start : t + 1].max())
+        return max(cur_stop, ref - k * atr_val)
+    ref = float(df["low"].iloc[start : t + 1].min())
+    return min(cur_stop, ref + k * atr_val)
+
+
+def last_swing_protective_stop(
+    df: pd.DataFrame,
+    t: int,
+    direction: Direction,
+    swing_lookback: int = 10,
+) -> Optional[float]:
+    """Use last local swing over lookback bars as protective level."""
+    if swing_lookback <= 1 or t <= 0:
+        return None
+    start = max(0, t - swing_lookback + 1)
+    if direction == "bull":
+        window = df["low"].iloc[start:t]
+        if window.empty:
+            return None
+        val = float(window.min())
+        return val if np.isfinite(val) else None
+    window = df["high"].iloc[start:t]
+    if window.empty:
+        return None
+    val = float(window.max())
+    return val if np.isfinite(val) else None

@@ -1,8 +1,9 @@
 # event-driven run over historical bars
 
 from __future__ import annotations
+import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Literal
+from typing import Dict, List, Optional, Tuple, Literal, Any
 import numpy as np
 import pandas as pd
 
@@ -15,6 +16,8 @@ from .detector import (
 )
 from .features import build_feature_row, regime_features_at
 from .filters import passes_basic_filters
+from .execution import update_trailing_stop, last_swing_protective_stop
+from .io_ext import archive_trade_bundle
 
 
 Direction = Literal["bull", "bear"]
@@ -75,7 +78,7 @@ def run_backtest(
     patterns: List[DetectedPattern] = detect_patterns(df=df, cfg=cfg, price_col=price_col)
     use_filters = cfg.enable_filters if apply_filters is None else bool(apply_filters)
 
-    rows: List[Dict] = []
+    rows: List[Dict[str, Any]] = []
     for pat in patterns:
         row = _simulate_trade_for_pattern(
             df=df,
@@ -112,6 +115,14 @@ def run_backtest(
         feat_df = trades_df["features"].apply(pd.Series)
         trades_df = pd.concat([trades_df.drop(columns=["features"]), feat_df], axis=1)
 
+    archive_dir = getattr(cfg, "archive_dir", None)
+    archive_prob = float(getattr(cfg, "archive_prob", 0.0) or 0.0)
+    if archive_dir and archive_prob > 0.0 and not trades_df.empty:
+        for _, row in trades_df.iterrows():
+            entry_idx = row.get("entry_idx")
+            if pd.notna(entry_idx) and random.random() <= archive_prob:
+                archive_trade_bundle(df, row, cfg, archive_dir, include_plot=True)
+
     return trades_df
 
 
@@ -127,7 +138,7 @@ def _simulate_trade_for_pattern(
     timeframe: Optional[str],
     price_col: str,
     use_filters: bool,
-) -> Dict:
+) -> Dict[str, Any]:
     """
     From a single DetectedPattern:
       - find breakout after j1 (within max_wait)
@@ -142,30 +153,38 @@ def _simulate_trade_for_pattern(
 
     filters_applied_val = 1.0 if use_filters else 0.0
 
-    def _base_features(entry_idx_for_target: Optional[int] = None) -> Dict[str, float]:
-        feat_inner = build_feature_row(df, atr, pat)
-        regime_inner = regime_features_at(
-            df,
-            idx=pat.cons.j1,
-            r2_window=50,
-            rv_window=50,
-            vol_ma_short=20,
-            vol_ma_long=50,
-            swing_window=200,
-            pivot_method_for_feature="PIP",
-            pip_order_for_feature=8,
-        )
-        feat_inner.update(regime_inner)
-        feat_inner["filters_applied"] = filters_applied_val
+    def _base_features(
+        entry_idx_for_target: Optional[int] = None,
+        *,
+        base: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        if base is not None:
+            feat_inner = dict(base)
+        else:
+            feat_inner = build_feature_row(df, atr, pat)
+            regime_inner = regime_features_at(
+                df,
+                idx=pat.cons.j1,
+                r2_window=50,
+                rv_window=50,
+                vol_ma_short=20,
+                vol_ma_long=50,
+                swing_window=200,
+                pivot_method_for_feature="PIP",
+                pip_order_for_feature=8,
+            )
+            feat_inner.update(regime_inner)
+            feat_inner["filters_applied"] = filters_applied_val
         if entry_idx_for_target is not None and 0 <= entry_idx_for_target < len(atr):
             feat_inner["telemetry_target_type"] = 1.0 if cfg.target_type == "atr_multiple" else 0.0
             feat_inner["telemetry_atr_at_entry"] = float(atr.iat[entry_idx_for_target])
         return feat_inner
 
+    base_features = _base_features()
+
     breakout_idx = _find_breakout_index(df, atr, pat, cfg, price_col=price_col)
     if breakout_idx is None:
-        # No breakout -> log a placeholder row (so we can analyze detections that failed to break)
-        feat = _base_features()
+        feat = _base_features(base=base_features)
         return _finalize_row(
             symbol, timeframe, pat, breakout_idx=None, entry_idx=None, exit_idx=None,
             entry_price=None, stop_price=None, target_price=None, exit_price=None,
@@ -189,19 +208,38 @@ def _simulate_trade_for_pattern(
             price_col=price_col,
         )
         if not passes_filters:
-            feat = _base_features()
+            feat = _base_features(base=base_features)
             return _finalize_row(
                 symbol, timeframe, pat, breakout_idx=breakout_idx, entry_idx=None, exit_idx=None,
                 entry_price=None, stop_price=None, target_price=None, exit_price=None,
                 exit_reason="filtered_out", pnl_pct=None, r_multiple=None, hold_bars=None, features=feat,
             )
 
+    # scoring gate (optional)
+    if getattr(cfg, "enable_scoring", False):
+        scorer = getattr(cfg, "scorer", None)
+        threshold = float(getattr(cfg, "scoring_threshold", 0.5))
+        if scorer is not None:
+            try:
+                score_val = float(scorer.predict_proba(base_features))
+                base_features["score"] = score_val
+                if score_val < threshold:
+                    feat = _base_features(base=base_features)
+                    return _finalize_row(
+                        symbol, timeframe, pat, breakout_idx=breakout_idx, entry_idx=None, exit_idx=None,
+                        entry_price=None, stop_price=None, target_price=None, exit_price=None,
+                        exit_reason="filtered_out", pnl_pct=None, r_multiple=None, hold_bars=None,
+                        features=feat,
+                    )
+            except Exception:
+                pass
+
     # Entry handling
     entry_idx = breakout_idx
     if cfg.entry_type == "next_open":
         entry_idx = breakout_idx + 1
         if entry_idx >= len(df):
-            feat = _base_features()
+            feat = _base_features(base=base_features)
             return _finalize_row(
                 symbol, timeframe, pat, breakout_idx=breakout_idx, entry_idx=None, exit_idx=None,
                 entry_price=None, stop_price=None, target_price=None, exit_price=None,
@@ -218,8 +256,7 @@ def _simulate_trade_for_pattern(
     # Risk R for R-multiple
     initial_risk = (entry_price - stop_price) if direction == "bull" else (stop_price - entry_price)
     if initial_risk <= 0:
-        # Degenerate geometry; skip trade
-        feat = _base_features(entry_idx)
+        feat = _base_features(entry_idx, base=base_features)
         return _finalize_row(
             symbol, timeframe, pat, breakout_idx=breakout_idx, entry_idx=entry_idx, exit_idx=None,
             entry_price=entry_price, stop_price=stop_price, target_price=target_price, exit_price=None,
@@ -237,6 +274,16 @@ def _simulate_trade_for_pattern(
     # for shorts, symmetric.
     for t in range(entry_idx + 1, max_idx + 1):
         hi, lo, op, cl = float(df["high"].iat[t]), float(df["low"].iat[t]), float(df["open"].iat[t]), float(df["close"].iat[t])
+
+        if getattr(cfg, "enable_trailing", False):
+            stop_price = update_trailing_stop(df, atr, t, direction, stop_price, cfg)
+        if getattr(cfg, "enable_last_swing_stop", False):
+            swing_stop = last_swing_protective_stop(df, t, direction, getattr(cfg, "swing_lookback", 10))
+            if swing_stop is not None:
+                if direction == "bull":
+                    stop_price = max(stop_price, swing_stop)
+                else:
+                    stop_price = min(stop_price, swing_stop)
 
         if direction == "bull":
             stop_hit = lo <= stop_price
@@ -273,7 +320,7 @@ def _simulate_trade_for_pattern(
     r_multiple = (exit_price - entry_price) / initial_risk if direction == "bull" else (entry_price - exit_price) / initial_risk
     hold_bars = exit_idx - entry_idx
 
-    feat = _base_features(entry_idx)
+    feat = _base_features(entry_idx, base=base_features)
     return _finalize_row(
         symbol, timeframe, pat, breakout_idx=breakout_idx, entry_idx=entry_idx, exit_idx=exit_idx,
         entry_price=entry_price, stop_price=stop_price, target_price=target_price, exit_price=exit_price,

@@ -81,9 +81,27 @@ class Config:
     # ---- Filters A/B switch ----
     enable_filters: bool = False
 
+    # ---- Scoring gate ----
+    enable_scoring: bool = False
+    scoring_threshold: float = 0.5
+    scorer: Optional[Any] = None
+
+    # ---- Execution research toggles ----
+    enable_trailing: bool = False
+    trail_lookback: int = 14
+    trail_atr_k: float = 3.0
+    enable_last_swing_stop: bool = False
+    swing_lookback: int = 10
+
+    # ---- Archiving ----
+    archive_dir: Optional[str] = None
+    archive_prob: float = 0.0
+
     # -------- Helpers --------
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("scorer", None)
+        return data
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Config":
@@ -108,3 +126,10 @@ class Config:
         if self.target_type == "atr_multiple":
             assert self.atr_target_k > 0.0
         assert self.min_pivot_points_per_line >= 1
+        assert 0.0 <= self.scoring_threshold <= 1.0
+        if self.enable_trailing:
+            assert self.trail_lookback >= 1
+            assert self.trail_atr_k >= 0.0
+        if self.enable_last_swing_stop:
+            assert self.swing_lookback >= 1
+        assert 0.0 <= self.archive_prob <= 1.0
