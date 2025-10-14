@@ -36,6 +36,11 @@ pivot_method: PIP            # {PIP,DirectionalChange}
 pip_order: 8
 dc_epsilon_atr_mult: null    # e.g., 0.3 -> 0.3*ATR if using DC
 
+# Boundary fitting (pip_order influence)
+boundary_fit_mode: pivots    # {bars,pivots}
+pivot_price_for_fit: hl2     # {close,hl2,ohlc4}
+min_pivot_points_per_line: 2
+
 # Filters (optional; set to null/false to skip)
 vol_dryup_ratio_max: 0.80        # mean(vol flag)/mean(vol pole) <= 0.8
 vol_expansion_mult_min: 1.60     # breakout vol >= 1.6 * MA(vol, L)
@@ -46,7 +51,10 @@ ma_len: 50
 ma_slope_min: 0.0                 # > 0 means upward slope
 
 # Backtest hygiene
-slippage_bps: 2
-commission_bps: 0
+slippage_bps: 5                   # conservative baseline for crypto taker-style fills
+commission_bps: 10                # conservative baseline for crypto taker-style fills
 event_purge_bars: 20
 embargo_bars: 10
+
+# Filters toggle
+enable_filters: false
