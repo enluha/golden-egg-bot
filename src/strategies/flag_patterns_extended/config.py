@@ -40,6 +40,17 @@ class Config:
     apex_pos_factor_max: float = 2.0           # ≤ X× consolidation length (to the right)
     pennant_require_slope_opposition: bool = True
 
+    # ---- Trendline variant (flag) heuristics ----
+    # Additional constraints inspired by trendline-based envelope approach
+    trend_flag_width_pole_max: float = 0.50   # flag width ≤ X * pole width
+    trend_flag_height_pole_max: float = 0.75  # flag height ≤ X * pole height
+    enable_trendline_variant: bool = True     # try trendline-style flag if parallel/pennant fail
+
+    # ---- Variant selection (analysis mode) ----
+    # If set, restrict detection strictly to the chosen variant and do not fall back/prioritize others.
+    # Allowed values: "flag_parallel", "pennant", "flag_trendline". If None, detector may use its own prioritization.
+    selected_variant: Optional[Literal["flag_parallel", "pennant", "flag_trendline"]] = None
+
     # ---- Breakout & execution ----
     breakout_requires_close: bool = True
     breakout_buffer_atr: float = 0.05
@@ -65,8 +76,8 @@ class Config:
     ma_slope_min: float = 0.0
 
     # ---- Backtest hygiene ----
-    slippage_bps: int = 2
-    commission_bps: int = 0
+    slippage_bps: int = 5
+    commission_bps: int = 10
     event_purge_bars: int = 20
     embargo_bars: int = 10
 
@@ -101,7 +112,20 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data.pop("scorer", None)
-        return data
+        # Ensure JSON-serializable by converting numpy scalars/arrays to Python types
+        try:
+            import numpy as _np  # type: ignore
+            def _pyify(x):
+                if isinstance(x, _np.generic):
+                    return x.item()
+                if isinstance(x, (list, tuple)):
+                    return [ _pyify(v) for v in x ]
+                if isinstance(x, dict):
+                    return { k: _pyify(v) for k, v in x.items() }
+                return x
+            return _pyify(data)
+        except Exception:
+            return data
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Config":
@@ -133,3 +157,10 @@ class Config:
         if self.enable_last_swing_stop:
             assert self.swing_lookback >= 1
         assert 0.0 <= self.archive_prob <= 1.0
+        assert 0.0 < self.trend_flag_width_pole_max
+        assert 0.0 < self.trend_flag_height_pole_max <= 1.0
+        # If a specific variant is requested, ensure it's one of the known options
+        if self.selected_variant is not None:
+            assert self.selected_variant in ("flag_parallel", "pennant", "flag_trendline"), (
+                f"Unknown selected_variant={self.selected_variant}"
+            )

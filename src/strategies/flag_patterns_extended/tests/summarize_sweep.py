@@ -266,9 +266,13 @@ def write_markdown_report(
     md.append(f"- **Top N:** `{topn}`, **Min trades per combo:** `{min_trades}`\n")
 
     md.append("## Top results (first rows)\n")
-    # Render a compact markdown table for the first few rows
+    # Render a compact table; fall back to plain text if tabulate is missing
     show_cols = [c for c in top_table.columns if c.startswith("param__")] + ["n_trades", "win_rate", "avg_pnl", "median_pnl", "sharpe_like"]
-    md.append(top_table[show_cols].head(min(10, len(top_table))).to_markdown(index=False))
+    preview = top_table[show_cols].head(min(10, len(top_table)))
+    try:
+        md.append(preview.to_markdown(index=False))
+    except ImportError:
+        md.append("```\n" + preview.to_string(index=False) + "\n```")
     md.append("\n")
 
     # Plots
@@ -293,10 +297,16 @@ def main():
     ap.add_argument("--rank-metric", default="sharpe_like", choices=["sharpe_like", "win_rate", "avg_pnl", "median_pnl"])
     ap.add_argument("--topn", type=int, default=25, help="Number of top combos to display/plot")
     ap.add_argument("--min-trades", type=int, default=30, help="Minimum trades per combo to be considered")
+    ap.add_argument("--test-only", action="store_true", default=True, help="Filter rows to split_side=='test' before summarizing (default)")
+    ap.add_argument("--all-sides", action="store_true", help="If set, do NOT filter by split_side (override --test-only)")
     args = ap.parse_args()
 
     _ensure_outdir(args.outdir)
     df = load_combined(args.combined)
+    # Default to test-only unless --all-sides is explicitly provided
+    if not args.all_sides:
+        if "split_side" in df.columns:
+            df = df[df["split_side"].astype(str).str.lower() == "test"].copy()
 
     # Summarize & rank
     summ = summarize(df, min_trades=args.min_trades, rank_metric=args.rank_metric)

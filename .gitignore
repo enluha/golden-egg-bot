@@ -3,3 +3,6 @@ venvTrading/
 artifacts/
 *.pyc
 __pycache__/
+phase1_outputs/
+summary_power/
+summary/

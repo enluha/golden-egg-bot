@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run 5-sample variant probe",
+			"type": "shell",
+			"command": "C:/Users/kiluh/OneDrive/Desktop/GoldenEggBot/venvTrading/Scripts/python.exe -m src.strategies.flag_patterns_extended.tests.evaluate --symbol BTCUSDT --timeframe 1h --sampler lhs --samples 5 --seed 123 --splits anchored --test-size 500 --step 250 --min-train 1000 --no-train-scorer --apply-filters --outdir ./phase1_outputs --tag phase1_btc1h_variant_only --n-jobs 1 --per-cell-csv --blas-threads 5 --variant pennant",
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "none"
+		}
+	]
+}

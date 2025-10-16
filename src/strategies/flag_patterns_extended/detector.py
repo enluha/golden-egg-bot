@@ -110,6 +110,8 @@ def detect_patterns(
             highs=highs,
             lows=lows,
             xs=xs,
+            pole_height=pole.height,
+            pole_len_bars=(pole.i1 - pole.i0),
         )
         if kind is None:
             t = cons.j1  # skip ahead to end of this consolidation window
@@ -391,6 +393,8 @@ def _classify_flag_or_pennant(
     highs: np.ndarray,
     lows: np.ndarray,
     xs: np.ndarray,
+    pole_height: float,
+    pole_len_bars: int,
 ) -> Tuple[Optional[PatternKind], Optional[float], Dict[str, Any]]:
     """
     Delegate geometry decisions to `geometry.py` helpers so all math lives in one place.
@@ -398,7 +402,7 @@ def _classify_flag_or_pennant(
     """
     features: Dict[str, Any] = {}
 
-    # 1) Try "flag" criteria: roughly parallel & modest channel slope
+    # 1) Evaluate flag (parallel) criteria
     ok_flag, flag_feats = is_flag_parallel(
         upper,
         lower,
@@ -413,18 +417,18 @@ def _classify_flag_or_pennant(
         touch_tol_frac_of_width=cfg.touch_tol_frac_of_width,
     )
     features.update({f"flag_{k}": v for k, v in flag_feats.items()})
+    # Prepare flag features (without early return when selection is enforced)
+    w0_flag = band_width_at(upper, lower, cons.j0)
+    w1_flag = band_width_at(upper, lower, cons.j1)
+    flag_variant_feats = {
+        "width_start": w0_flag,
+        "width_end": w1_flag,
+        "width_shrink_ratio": (w1_flag / w0_flag) if w0_flag != 0 else float("inf"),
+        "apex_x": float("nan"),
+        "variant": "flag_parallel",
+    }
 
-    if ok_flag:
-        # Additional diagnostics for consistency
-        w0 = band_width_at(upper, lower, cons.j0)
-        w1 = band_width_at(upper, lower, cons.j1)
-        features.update(
-            {"width_start": w0, "width_end": w1, "width_shrink_ratio": (w1 / w0) if w0 != 0 else float("inf"),
-             "apex_x": float("nan")}
-        )
-        return "flag", None, features
-
-    # 2) Try "pennant" criteria: converging with width shrink and plausible apex
+    # 2) Evaluate pennant criteria
     ok_pen, apex_x, pen_feats = is_pennant_converging(
         upper,
         lower,
@@ -440,11 +444,88 @@ def _classify_flag_or_pennant(
         touch_tol_frac_of_width=cfg.touch_tol_frac_of_width,
     )
     features.update({f"pen_{k}": v for k, v in pen_feats.items()})
+    pen_variant_feats = {
+        "apex_x": float(apex_x) if apex_x is not None else float("nan"),
+        "variant": "pennant",
+    }
 
+    # 3) Evaluate trendline-style flag constraints (without returning yet)
+    ok_trend = False
+    trend_feats: Dict[str, Any] = {}
+    if getattr(cfg, "enable_trendline_variant", False):
+        # Estimate pole and flag measures from indices and fitted band
+        w0 = band_width_at(upper, lower, cons.j0)
+        w1 = band_width_at(upper, lower, cons.j1)
+        band_w = 0.5 * (w0 + w1)
+        # Use realized range within consolidation window as height proxy
+        flag_height = float(np.max(highs) - np.min(lows)) if len(highs) and len(lows) else abs(w0 - w1) + min(w0, w1)
+        # Defensive guards
+        pole_height_safe = max(1e-9, float(pole_height))
+        pole_len_safe = max(1, int(pole_len_bars))
+        # Apply relative caps: require a relatively narrow band compared to the pole's height
+        width_ok = (band_w <= cfg.trend_flag_width_pole_max * pole_height_safe)
+        height_ok = (flag_height <= cfg.trend_flag_height_pole_max * pole_height_safe)
+        # Avoid wildly expanding channels
+        non_expand_ok = (w1 <= 1.5 * max(1e-12, w0))
+        if width_ok and height_ok and non_expand_ok:
+            ok_trend = True
+            trend_feats.update(
+                {
+                    "trend_band_width": float(band_w),
+                    "trend_flag_height": float(flag_height),
+                    "trend_pole_width_bars": float(pole_len_safe),
+                    "trend_pole_height": float(pole_height_safe),
+                    "variant": "flag_trendline",
+                }
+            )
+
+    # Decide which variant to emit based on selection (no prioritization across variants when selected)
+    selected = getattr(cfg, "selected_variant", None)
+    if selected is not None:
+        if selected == "flag_parallel" and ok_flag:
+            out = dict(features)
+            out.update(flag_variant_feats)
+            return "flag", None, out
+        if selected == "pennant" and ok_pen:
+            out = dict(features)
+            out.update(pen_variant_feats)
+            return "pennant", apex_x, out
+        if selected == "flag_trendline" and ok_trend:
+            out = dict(features)
+            out.update(trend_feats)
+            return "flag", None, out
+        # When a selection is enforced but not satisfied, this consolidation is ignored
+        theta_u = angle_deg(upper.slope)
+        theta_l = angle_deg(lower.slope)
+        w0 = band_width_at(upper, lower, cons.j0)
+        w1 = band_width_at(upper, lower, cons.j1)
+        features.update(
+            dict(
+                theta_u=theta_u,
+                theta_l=theta_l,
+                theta_diff=abs(theta_u - theta_l),
+                theta_channel=0.5 * (theta_u + theta_l),
+                width_start=w0,
+                width_end=w1,
+                width_shrink_ratio=(w1 / w0) if w0 != 0 else float("inf"),
+                apex_x=float(intersection_x(upper, lower) or float("nan")),
+            )
+        )
+        return None, intersection_x(upper, lower), features
+
+    # Default behaviour (no selection): keep previous prioritization
+    if ok_flag:
+        out = dict(features)
+        out.update(flag_variant_feats)
+        return "flag", None, out
     if ok_pen:
-        # For pennants the apex_x is meaningful; include angles for reference too
-        features.setdefault("apex_x", float(apex_x) if apex_x is not None else float("nan"))
-        return "pennant", apex_x, features
+        out = dict(features)
+        out.update(pen_variant_feats)
+        return "pennant", apex_x, out
+    if ok_trend:
+        out = dict(features)
+        out.update(trend_feats)
+        return "flag", None, out
 
     # Neither condition satisfied
     # Still emit basic angle/width diagnostics for debugging downstream

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple, Dict, Literal
+from typing import TYPE_CHECKING, Any, Dict, Literal, Optional, Tuple
 
 import numpy as np
 
-from .detector import BoundaryLine, ConsolidationStats
+if TYPE_CHECKING:
+    from .detector import BoundaryLine, ConsolidationStats
+else:
+    BoundaryLine = Any  # type: ignore
+    ConsolidationStats = Any  # type: ignore
 
 Direction = Literal["bull", "bear"]
 

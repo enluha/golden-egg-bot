@@ -22,6 +22,21 @@ from .io_ext import archive_trade_bundle
 
 Direction = Literal["bull", "bear"]
 
+# Optional Numba acceleration (falls back to no-op decorator if Numba unavailable)
+try:  # pragma: no cover
+    import numba as _nb  # type: ignore
+    _njit = _nb.njit(cache=True, fastmath=True)
+except Exception:  # pragma: no cover
+    _nb = None
+    def _njit(*dargs, **dkwargs):  # type: ignore
+        # Support both bare-decorator (@_njit) and parameterized (@_njit(...)) usage
+        if dargs and callable(dargs[0]) and len(dargs) == 1 and not dkwargs:
+            # Bare decorator form: @_njit above a function
+            return dargs[0]
+        def deco(fn):
+            return fn
+        return deco
+
 
 @dataclass(frozen=True)
 class TradeResult:
@@ -265,54 +280,88 @@ def _simulate_trade_for_pattern(
 
     # Walk forward bar-by-bar to find exit
     max_idx = len(df) - 1
-    exit_reason = None
-    exit_idx = None
-    exit_price = None
+    exit_reason: Optional[str] = None
+    exit_idx: Optional[int] = None
+    exit_price: Optional[float] = None
 
-    # Conservative intra-bar rule:
-    # for longs, STOP triggers before TARGET if both touched same bar (worst-case).
-    # for shorts, symmetric.
-    for t in range(entry_idx + 1, max_idx + 1):
-        hi, lo, op, cl = float(df["high"].iat[t]), float(df["low"].iat[t]), float(df["open"].iat[t]), float(df["close"].iat[t])
+    trailing_on = bool(getattr(cfg, "enable_trailing", False) or getattr(cfg, "enable_last_swing_stop", False))
+    if not trailing_on:
+        highs = df["high"].to_numpy(dtype=float)
+        lows = df["low"].to_numpy(dtype=float)
+        dir_flag = 1 if direction == "bull" else -1
 
-        if getattr(cfg, "enable_trailing", False):
-            stop_price = update_trailing_stop(df, atr, t, direction, stop_price, cfg)
-        if getattr(cfg, "enable_last_swing_stop", False):
-            swing_stop = last_swing_protective_stop(df, t, direction, getattr(cfg, "swing_lookback", 10))
-            if swing_stop is not None:
-                if direction == "bull":
-                    stop_price = max(stop_price, swing_stop)
+        @_njit
+        def _scan_exit(start_i: int, end_i: int, highs: np.ndarray, lows: np.ndarray, stop_p: float, target_p: float, dir_flag: int):
+            # returns (idx, code): code 0=stop, 1=target, -1=timeout
+            for t in range(start_i, end_i + 1):
+                hi = highs[t]
+                lo = lows[t]
+                if dir_flag == 1:
+                    if lo <= stop_p:
+                        return t, 0
+                    if hi >= target_p:
+                        return t, 1
                 else:
-                    stop_price = min(stop_price, swing_stop)
+                    if hi >= stop_p:
+                        return t, 0
+                    if lo <= target_p:
+                        return t, 1
+            return -1, -1
 
-        if direction == "bull":
-            stop_hit = lo <= stop_price
-            target_hit = hi >= target_price
-            if stop_hit:
-                exit_idx, exit_reason, raw_exit = t, "stop", stop_price
-            elif target_hit:
-                exit_idx, exit_reason, raw_exit = t, "target", target_price
+        eidx, code = _scan_exit(entry_idx + 1, max_idx, highs, lows, float(stop_price), float(target_price), dir_flag)
+        if eidx >= 0:
+            exit_idx = int(eidx)
+            if code == 0:
+                exit_reason = "stop"
+                raw_exit = float(stop_price)
             else:
-                continue
+                exit_reason = "target"
+                raw_exit = float(target_price)
+            exit_price = _apply_exit_slippage(raw_exit, direction, cfg.slippage_bps)
         else:
-            stop_hit = hi >= stop_price
-            target_hit = lo <= target_price
-            if stop_hit:
-                exit_idx, exit_reason, raw_exit = t, "stop", stop_price
-            elif target_hit:
-                exit_idx, exit_reason, raw_exit = t, "target", target_price
+            exit_idx = max_idx
+            exit_reason = "timeout"
+            exit_price = _apply_exit_slippage(float(df["close"].iat[exit_idx]), direction, cfg.slippage_bps)
+    else:
+        # Fallback to original loop when trailing or swing stops are enabled
+        for t in range(entry_idx + 1, max_idx + 1):
+            hi = float(df["high"].iat[t])
+            lo = float(df["low"].iat[t])
+
+            if getattr(cfg, "enable_trailing", False):
+                stop_price = update_trailing_stop(df, atr, t, direction, stop_price, cfg)
+            if getattr(cfg, "enable_last_swing_stop", False):
+                swing_stop = last_swing_protective_stop(df, t, direction, getattr(cfg, "swing_lookback", 10))
+                if swing_stop is not None:
+                    if direction == "bull":
+                        stop_price = max(stop_price, swing_stop)
+                    else:
+                        stop_price = min(stop_price, swing_stop)
+
+            if direction == "bull":
+                if lo <= stop_price:
+                    exit_idx, exit_reason, raw_exit = t, "stop", stop_price
+                elif hi >= target_price:
+                    exit_idx, exit_reason, raw_exit = t, "target", target_price
+                else:
+                    continue
             else:
-                continue
+                if hi >= stop_price:
+                    exit_idx, exit_reason, raw_exit = t, "stop", stop_price
+                elif lo <= target_price:
+                    exit_idx, exit_reason, raw_exit = t, "target", target_price
+                else:
+                    continue
 
-        # Apply exit slippage
-        exit_price = _apply_exit_slippage(raw_exit, direction, cfg.slippage_bps)
-        break
+            # Apply exit slippage
+            exit_price = _apply_exit_slippage(raw_exit, direction, cfg.slippage_bps)
+            break
 
-    if exit_idx is None:
-        # No exit event — treat as timeout at last available bar
-        exit_idx = max_idx
-        exit_reason = "timeout"
-        exit_price = _apply_exit_slippage(float(df["close"].iat[exit_idx]), direction, cfg.slippage_bps)
+        if exit_idx is None:
+            # No exit event — treat as timeout at last available bar
+            exit_idx = max_idx
+            exit_reason = "timeout"
+            exit_price = _apply_exit_slippage(float(df["close"].iat[exit_idx]), direction, cfg.slippage_bps)
 
     # Compute net P&L (per-unit return), commission per side in bps
     pnl_pct = _compute_net_return(entry_price, exit_price, direction, cfg.commission_bps)
@@ -350,29 +399,52 @@ def _find_breakout_index(
     start = j1 + 1
     end = min(j1 + cfg.max_wait_bars_after_consolidation, len(df) - 1)
 
-    for t in range(start, end + 1):
-        buf = cfg.breakout_buffer_atr * float(atr.iat[t])
-        up = _boundary_value_at(pat.upper, t)
-        lo = _boundary_value_at(pat.lower, t)
-        hi_t, lo_t, cl_t = float(df["high"].iat[t]), float(df["low"].iat[t]), float(df["close"].iat[t])
+    if start > end:
+        return None
 
-        if pat.pole.direction == "bull":
-            # Need price above upper + buffer
-            if cfg.breakout_requires_close:
-                if cl_t >= up + buf:
-                    return t
+    highs = df["high"].to_numpy(dtype=float)
+    lows = df["low"].to_numpy(dtype=float)
+    closes = df["close"].to_numpy(dtype=float)
+    atr_arr = atr.to_numpy(dtype=float)
+
+    us, ui = float(pat.upper.slope), float(pat.upper.intercept)
+    ls, li = float(pat.lower.slope), float(pat.lower.intercept)
+    buf_m = float(cfg.breakout_buffer_atr)
+    dflag = 1 if pat.pole.direction == "bull" else -1
+    rclose = 1 if cfg.breakout_requires_close else 0
+
+    @_njit
+    def _scan_breakout(start_i: int, end_i: int,
+                       highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, atr_arr: np.ndarray,
+                       us: float, ui: float, ls: float, li: float,
+                       buf_m: float, dflag: int, rclose: int) -> int:
+        for t in range(start_i, end_i + 1):
+            buf = buf_m * atr_arr[t]
+            up = us * t + ui
+            lo = ls * t + li
+            hi_t = highs[t]
+            lo_t = lows[t]
+            cl_t = closes[t]
+            if dflag == 1:
+                thr = up + buf
+                if rclose == 1:
+                    if cl_t >= thr:
+                        return t
+                else:
+                    if hi_t >= thr:
+                        return t
             else:
-                if hi_t >= up + buf:
-                    return t
-        else:
-            # Need price below lower - buffer
-            if cfg.breakout_requires_close:
-                if cl_t <= lo - buf:
-                    return t
-            else:
-                if lo_t <= lo - buf:
-                    return t
-    return None
+                thr = lo - buf
+                if rclose == 1:
+                    if cl_t <= thr:
+                        return t
+                else:
+                    if lo_t <= thr:
+                        return t
+        return -1
+
+    idx = _scan_breakout(start, end, highs, lows, closes, atr_arr, us, ui, ls, li, buf_m, dflag, rclose)
+    return None if idx < 0 else int(idx)
 
 
 def _compute_stop_at_entry(
@@ -466,6 +538,7 @@ def _finalize_row(
         symbol=symbol,
         timeframe=timeframe,
         kind=pat.kind,
+        variant=pat.features.get("variant") if isinstance(pat.features, dict) else None,
         direction=pat.pole.direction,
         i0=pat.pole.i0,
         i1=pat.pole.i1,

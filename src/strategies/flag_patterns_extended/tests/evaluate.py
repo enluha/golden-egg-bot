@@ -14,7 +14,7 @@ from ..config import Config
 from ..orchestrator import run_experiments
 from ..samplers import latin_hypercube, random_samples
 from ..scoring import LogisticScorer
-from ..splits import Split, anchored_walk_forward, purged_kfold_indices
+from ..splits import Split, anchored_walk_forward, purged_kfold_indices, render_split_timeline
 from ..sweep import product_dict
 
 
@@ -118,10 +118,18 @@ def try_download_data(
     end_date: Optional[str] = None,
     interval_seconds: Optional[int] = None,
 ) -> Optional[str]:
-    rel_path = os.path.join(os.path.dirname(__file__), "..", "data_samples", "download_data_sample.py")
-    dl_path = os.path.abspath(rel_path)
-    if not os.path.exists(dl_path):
+    base_dir = os.path.dirname(__file__)
+    candidate_paths = [
+        os.path.abspath(os.path.join(base_dir, "..", "data_samples", "download_data_sample.py")),
+        os.path.abspath(os.path.join(base_dir, "..", "..", "data_samples", "download_data_sample.py")),
+        os.path.abspath(os.path.join(base_dir, "..", "..", "flag_patterns", "data_samples", "download_data_sample.py")),
+    ]
+
+    dl_path = next((path for path in candidate_paths if os.path.exists(path)), None)
+    if dl_path is None:
         return None
+
+    os.makedirs(data_dir, exist_ok=True)
 
     spec = importlib.util.spec_from_file_location("download_data_sample", dl_path)
     if spec is None or spec.loader is None:
@@ -203,13 +211,17 @@ def main() -> int:
     parser.add_argument("--test-size", type=int, default=500)
     parser.add_argument("--step", type=int, default=250)
     parser.add_argument("--min-train", type=int, default=1000)
+    parser.add_argument("--train-end-date", default=None, help="Optional date (YYYY-MM-DD). If provided and the CSV has a datetime index, min-train will be set to the number of rows up to and including this date.")
 
     parser.add_argument("--sampler", choices=["grid", "lhs", "random"], default="grid")
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--apply-filters", action="store_true")
-    parser.add_argument("--train-scorer", action="store_true")
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument("--train-scorer", dest="train_scorer", action="store_true")
+    grp.add_argument("--no-train-scorer", dest="train_scorer", action="store_false")
+    parser.set_defaults(train_scorer=True)
     parser.add_argument("--score-threshold", type=float, default=0.55)
 
     parser.add_argument("--archive", action="store_true")
@@ -218,11 +230,24 @@ def main() -> int:
 
     parser.add_argument("--outdir", default="./phase1_outputs")
     parser.add_argument("--tag", default="phase1_btc1h")
+    parser.add_argument("--n-jobs", type=int, default=1, help="Parallel workers for samples (processes)")
+    parser.add_argument("--per-cell-csv", action="store_true", help="Write per-split/sample CSVs (default off when parallel)")
+    parser.add_argument("--blas-threads", type=int, default=None, help="Set maximum BLAS threads (MKL/OPENBLAS_NUM_THREADS)")
+    parser.add_argument(
+        "--variant",
+        choices=["flag_parallel", "pennant", "flag_trendline"],
+        default=None,
+        help="Restrict detection to a single variant (no cross-variant prioritization)",
+    )
 
     args = parser.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
 
     overall_start = time.perf_counter()
+    # BLAS threads control
+    if args.blas_threads is not None and int(args.blas_threads) > 0:
+        os.environ["MKL_NUM_THREADS"] = str(int(args.blas_threads))
+        os.environ["OPENBLAS_NUM_THREADS"] = str(int(args.blas_threads))
 
     steps: List[str] = [
         "Locate or download dataset",
@@ -291,6 +316,23 @@ def main() -> int:
     df = load_csv(csv_path)
     step_end(f"Loaded {len(df)} rows with columns {', '.join(df.columns)}")
 
+    # Optional: derive min_train from a calendar cutoff
+    if getattr(args, "train_end_date", None):
+        try:
+            cutoff = pd.to_datetime(args.train_end_date)
+            if isinstance(df.index, pd.DatetimeIndex):
+                min_train_rows = int((df.index <= cutoff).sum())
+                if min_train_rows <= 0:
+                    print(f"[progress] train_end_date {args.train_end_date} occurs before data start; keeping --min-train={args.min_train}")
+                else:
+                    old = args.min_train
+                    args.min_train = min_train_rows
+                    print(f"[progress] Derived --min-train from --train-end-date {args.train_end_date}: {old} -> {args.min_train}")
+            else:
+                print("[progress] DataFrame index is not datetime; ignoring --train-end-date.")
+        except Exception as exc:
+            print(f"[progress] Failed to parse/apply --train-end-date: {exc}")
+
     step_start("Build evaluation splits")
     splits = build_splits(len(df), args)
     split_count = 0 if splits is None else len(splits)
@@ -298,13 +340,17 @@ def main() -> int:
 
     base_cfg = Config()
     base_cfg.enable_filters = bool(args.apply_filters)
+    # Restrict to a single variant if requested
+    if getattr(args, "variant", None):
+        base_cfg.selected_variant = args.variant  # type: ignore[assignment]
     if args.archive:
         base_cfg.archive_dir = args.archive_dir
         base_cfg.archive_prob = args.archive_prob
 
     grid = phase1_grid()
-    grid_combos = product_dict(grid)
     if args.sampler == "grid":
+        grid_combos = product_dict(grid)
+
         def grid_sampler(_: Dict[str, Iterable[Any]], __: int, ___: int) -> List[Dict[str, Any]]:
             return grid_combos
 
@@ -318,6 +364,21 @@ def main() -> int:
         n_samples = int(args.samples)
 
     datasets = [(args.symbol, args.timeframe, df)]
+
+    # Informative plan banner
+    ds_n = len(datasets)
+    splits_n = 0 if splits is None else len(splits)
+    est_cells = ds_n * max(1, splits_n) * max(1, n_samples)
+    print(
+        f"[progress] Plan: sampler={args.sampler} n_samples={n_samples}; "
+        f"datasets={ds_n}; splits={splits_n}; estimated cells≈{est_cells}"
+    )
+    # Split timeline
+    try:
+        timeline = render_split_timeline(len(df), splits or [])
+        print("[splits]", timeline)
+    except Exception:
+        pass
 
     scorer = None
     if args.train_scorer:
@@ -366,6 +427,10 @@ def main() -> int:
         seed=args.seed,
         splits=splits,
         apply_filters=args.apply_filters,
+        scorer=scorer,
+        score_threshold=args.score_threshold if scorer is not None else None,
+        n_jobs=args.n_jobs,
+        per_cell_csv=bool(args.per_cell_csv),
         outdir=args.outdir,
         tag=main_tag,
     )
